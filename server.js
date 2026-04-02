@@ -936,9 +936,9 @@ async function main() {
     void serveRequest(req, res, vite)
   })
 
-  server.listen(port, () => {
+  server.listen(port, '0.0.0.0', () => {
     const mode = isProd ? 'production' : 'development'
-    console.log(`Point2Point server running on http://localhost:${port} (${mode})`)
+    console.log(`Point2Point server running on http://0.0.0.0:${port} (${mode})`)
   })
 }
 
