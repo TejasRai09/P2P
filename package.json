@@ -8,7 +8,7 @@
     "build": "vite build",
     "lint": "eslint .",
     "preview": "node server.js --prod",
-    "start": "node server.js --prod"
+    "start": "npm run build && node server.js --prod"
   },
   "dependencies": {
     "lucide-react": "^0.511.0",
