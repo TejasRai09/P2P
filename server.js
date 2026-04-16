@@ -10,7 +10,6 @@ import {
 import { readFile } from 'node:fs/promises'
 import crypto from 'node:crypto'
 import mysql from 'mysql2/promise'
-import { createServer as createViteServer } from 'vite'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -22,10 +21,13 @@ const dbHost = process.env.DB_HOST || '127.0.0.1'
 const dbPort = Number(process.env.DB_PORT || 3306)
 const dbUser = process.env.DB_USER || 'root'
 const dbPassword = process.env.DB_PASSWORD || 'server1'
-const dbName = process.env.DB_NAME || 'point2point'
+const dbName = process.env.DB_NAME || 'z_track'
 const tokenTtlDays = 7
+const requiredProductionEnvVars = ['DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME']
 
 let pool = null
+let server = null
+let shuttingDown = false
 
 function isoNow() {
   return new Date().toISOString()
@@ -97,6 +99,15 @@ function getMimeType(filePath) {
     '.json': 'application/json; charset=utf-8',
     '.txt': 'text/plain; charset=utf-8',
   }[ext] || 'application/octet-stream'
+}
+
+function assertProductionConfig() {
+  if (!isProd) return
+
+  const missing = requiredProductionEnvVars.filter(name => !String(process.env[name] || '').trim())
+  if (missing.length > 0) {
+    throw new Error(`Missing required production environment variables: ${missing.join(', ')}`)
+  }
 }
 
 function hashPassword(password, salt = crypto.randomBytes(16).toString('base64url')) {
@@ -251,7 +262,8 @@ async function initSchema() {
 }
 
 const seedUsers = [
-  { id: 'admin', name: 'Super Admin', role: 'Admin', department: 'Operations', password: 'Zuari@54321' },
+  { id: 'admin', name: 'Super Admin', role: 'Super Admin', department: 'Operations', password: 'Zuari@54321' },
+  { id: 'subadmin', name: 'Admin User', role: 'Admin', department: 'Admin', password: 'ADMIN@12345' },
   { id: 'hr', name: 'HR User', role: 'Employee', department: 'HR', password: 'HR@12345' },
   { id: 'finance', name: 'Finance User', role: 'Employee', department: 'Finance', password: 'FINANCE@12345' },
   { id: 'it', name: 'IT User', role: 'Employee', department: 'IT', password: 'IT@12345' },
@@ -339,6 +351,20 @@ async function seedDatabase() {
         )
       }
     })
+  } else {
+    // Migration: Update admin to Super Admin if needed
+    await execute(`UPDATE users SET role = 'Super Admin' WHERE id = 'admin' AND role = 'Admin'`)
+    
+    // Migration: Insert the subadmin if it doesn't already exist
+    const subadminCount = await queryOne('SELECT COUNT(*) AS count FROM users WHERE id = ?', ['subadmin'])
+    if (!subadminCount || Number(subadminCount.count) === 0) {
+      const hashed = hashPassword('ADMIN@12345')
+      const timestamp = isoNow()
+      await execute(
+        `INSERT INTO users (id, name, role, department, password_hash, password_salt, password_scheme, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ['subadmin', 'Admin User', 'Admin', 'Admin', hashed.hash, hashed.salt, hashed.scheme, timestamp, timestamp]
+      )
+    }
   }
 
   const runnerCount = await queryOne('SELECT COUNT(*) AS count FROM runners')
@@ -398,7 +424,7 @@ async function listPublicUsers() {
   const rows = await queryAll(
     `SELECT id, name, role, department
      FROM users
-     ORDER BY CASE WHEN role = 'Admin' THEN 0 ELSE 1 END, department ASC, name ASC`,
+     ORDER BY CASE WHEN role = 'Super Admin' THEN 0 WHEN role = 'Admin' THEN 1 ELSE 2 END, department ASC, name ASC`,
   )
   return rows.map(publicUser)
 }
@@ -407,7 +433,7 @@ async function listPrivateUsers() {
   const rows = await queryAll(
     `SELECT id, name, role, department
      FROM users
-     ORDER BY CASE WHEN role = 'Admin' THEN 0 ELSE 1 END, department ASC, name ASC`,
+     ORDER BY CASE WHEN role = 'Super Admin' THEN 0 WHEN role = 'Admin' THEN 1 ELSE 2 END, department ASC, name ASC`,
   )
   return rows.map(privateUser)
 }
@@ -418,7 +444,7 @@ async function listRunners() {
 }
 
 async function listRequestsForUser(user) {
-  const rows = user.role === 'Admin'
+  const rows = user.role === 'Super Admin' || user.role === 'Admin'
     ? await queryAll('SELECT * FROM requests ORDER BY date DESC, created_at DESC')
     : await queryAll('SELECT * FROM requests WHERE employee_id = ? ORDER BY date DESC, created_at DESC', [user.id])
   return rows.map(requestFromRow)
@@ -428,10 +454,16 @@ async function buildBootstrap(user) {
   return {
     currentUser: user ? publicUser(user) : null,
     publicUsers: await listPublicUsers(),
-    users: user?.role === 'Admin' ? await listPrivateUsers() : await listPublicUsers(),
+    users: user?.role === 'Super Admin' ? await listPrivateUsers() : await listPublicUsers(),
     runners: await listRunners(),
     requests: user ? await listRequestsForUser(user) : [],
   }
+}
+
+function isWithinDistDir(filePath) {
+  const resolvedDistDir = path.resolve(distDir) + path.sep
+  const resolvedFilePath = path.resolve(filePath)
+  return resolvedFilePath.startsWith(resolvedDistDir)
 }
 
 async function createSession(userId) {
@@ -476,8 +508,20 @@ function requireAdmin(res, user) {
     json(res, 401, { error: 'Authentication required.' })
     return false
   }
-  if (user.role !== 'Admin') {
+  if (user.role !== 'Admin' && user.role !== 'Super Admin') {
     json(res, 403, { error: 'Admin access required.' })
+    return false
+  }
+  return true
+}
+
+function requireSuperAdmin(res, user) {
+  if (!user) {
+    json(res, 401, { error: 'Authentication required.' })
+    return false
+  }
+  if (user.role !== 'Super Admin') {
+    json(res, 403, { error: 'Super Admin access required.' })
     return false
   }
   return true
@@ -596,7 +640,7 @@ async function handleApi(req, res, url) {
       return true
     }
 
-    if (user.role !== 'Admin' && requestRow.employee_id !== user.id) {
+    if (user.role !== 'Super Admin' && user.role !== 'Admin' && requestRow.employee_id !== user.id) {
       json(res, 403, { error: 'You can only view your own requests.' })
       return true
     }
@@ -736,7 +780,7 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === '/api/runners' && req.method === 'POST') {
     const user = await authUserFromToken(getBearerToken(req))
-    if (!requireAdmin(res, user)) return true
+    if (!requireSuperAdmin(res, user)) return true
 
     const body = await readBody(req)
     const name = String(body.name || '').trim()
@@ -759,7 +803,7 @@ async function handleApi(req, res, url) {
 
   if (url.pathname.match(/^\/api\/runners\/[^/]+$/) && req.method === 'DELETE') {
     const user = await authUserFromToken(getBearerToken(req))
-    if (!requireAdmin(res, user)) return true
+    if (!requireSuperAdmin(res, user)) return true
 
     const name = decodeURIComponent(url.pathname.split('/').pop() || '')
     await execute('DELETE FROM runners WHERE name = ?', [name])
@@ -769,13 +813,13 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === '/api/users' && req.method === 'POST') {
     const user = await authUserFromToken(getBearerToken(req))
-    if (!requireAdmin(res, user)) return true
+    if (!requireSuperAdmin(res, user)) return true
 
     const body = await readBody(req)
     const id = String(body.id || '').trim().toLowerCase().replace(/\s+/g, '')
     const name = String(body.name || '').trim()
     const department = String(body.department || '').trim()
-    const password = String(body.password || `P2P-${crypto.randomBytes(4).toString('hex').toUpperCase()}`).trim()
+    const password = String(body.password || `ZTRACK-${crypto.randomBytes(4).toString('hex').toUpperCase()}`).trim()
 
     if (!id || !name || !department) {
       json(res, 400, { error: 'Login ID, name, and department are required.' })
@@ -804,7 +848,7 @@ async function handleApi(req, res, url) {
 
   if (url.pathname.match(/^\/api\/users\/[^/]+$/) && req.method === 'DELETE') {
     const user = await authUserFromToken(getBearerToken(req))
-    if (!requireAdmin(res, user)) return true
+    if (!requireSuperAdmin(res, user)) return true
 
     const id = decodeURIComponent(url.pathname.split('/').pop() || '')
     if (id === 'admin') {
@@ -820,7 +864,7 @@ async function handleApi(req, res, url) {
 
   if (url.pathname.match(/^\/api\/users\/[^/]+\/reset-password$/) && req.method === 'POST') {
     const user = await authUserFromToken(getBearerToken(req))
-    if (!requireAdmin(res, user)) return true
+    if (!requireSuperAdmin(res, user)) return true
 
     const id = decodeURIComponent(url.pathname.split('/')[3] || '')
     const existing = await queryOne('SELECT id FROM users WHERE id = ?', [id])
@@ -829,7 +873,7 @@ async function handleApi(req, res, url) {
       return true
     }
 
-    const password = `P2P-${crypto.randomBytes(4).toString('hex').toUpperCase()}`
+    const password = `ZTRACK-${crypto.randomBytes(4).toString('hex').toUpperCase()}`
     const hashed = hashPassword(password)
     await execute(
       `UPDATE users
@@ -847,6 +891,16 @@ async function handleApi(req, res, url) {
 
 async function serveRequest(req, res, vite) {
   const url = new URL(req.url || '/', 'http://localhost')
+
+  if (url.pathname === '/healthz' && req.method === 'GET') {
+    json(res, 200, {
+      ok: true,
+      status: 'healthy',
+      mode: isProd ? 'production' : 'development',
+      uptimeSeconds: Math.floor(process.uptime()),
+    })
+    return
+  }
 
   if (url.pathname.startsWith('/api/')) {
     try {
@@ -866,7 +920,12 @@ async function serveRequest(req, res, vite) {
     }
 
     const cleanedPath = decodeURIComponent(url.pathname)
-    const filePath = path.join(distDir, cleanedPath === '/' ? 'index.html' : cleanedPath.replace(/^\//, ''))
+    const filePath = path.resolve(distDir, cleanedPath === '/' ? 'index.html' : cleanedPath.replace(/^\//, ''))
+    if (!isWithinDistDir(filePath)) {
+      text(res, 403, 'Forbidden')
+      return
+    }
+
     if (cleanedPath !== '/' && existsSync(filePath) && statSync(filePath).isFile()) {
       res.writeHead(200, { 'Content-Type': getMimeType(filePath) })
       createReadStream(filePath).pipe(res)
@@ -918,13 +977,40 @@ async function createPoolForApp() {
   })
 }
 
+async function shutdown(signal) {
+  if (shuttingDown) return
+  shuttingDown = true
+
+  console.log(`${signal} received, shutting down gracefully...`)
+
+  try {
+    if (server) {
+      await new Promise(resolve => server.close(resolve))
+    }
+  } catch (error) {
+    console.error('Failed to close HTTP server cleanly:', error)
+  }
+
+  try {
+    if (pool) {
+      await pool.end()
+    }
+  } catch (error) {
+    console.error('Failed to close database pool cleanly:', error)
+  }
+
+  process.exit(0)
+}
+
 async function main() {
+  assertProductionConfig()
   pool = await createPoolForApp()
   await initSchema()
   await seedDatabase()
 
   let vite = null
   if (!isProd) {
+    const { createServer: createViteServer } = await import('vite')
     vite = await createViteServer({
       root: rootDir,
       appType: 'custom',
@@ -932,15 +1018,36 @@ async function main() {
     })
   }
 
-  const server = http.createServer((req, res) => {
+  server = http.createServer((req, res) => {
     void serveRequest(req, res, vite)
   })
+  server.requestTimeout = 30_000
+  server.headersTimeout = 35_000
+  server.keepAliveTimeout = 65_000
 
   server.listen(port, '0.0.0.0', () => {
     const mode = isProd ? 'production' : 'development'
-    console.log(`Point2Point server running on http://0.0.0.0:${port} (${mode})`)
+    console.log(`Z-Track server running on http://0.0.0.0:${port} (${mode})`)
   })
 }
+
+process.on('SIGINT', () => {
+  void shutdown('SIGINT')
+})
+
+process.on('SIGTERM', () => {
+  void shutdown('SIGTERM')
+})
+
+process.on('unhandledRejection', error => {
+  console.error('Unhandled promise rejection:', error)
+  if (isProd) process.exit(1)
+})
+
+process.on('uncaughtException', error => {
+  console.error('Uncaught exception:', error)
+  process.exit(1)
+})
 
 main().catch(error => {
   console.error(error)

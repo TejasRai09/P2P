@@ -1,5 +1,5 @@
 {
-  "name": "point2point",
+  "name": "z-track",
   "private": true,
   "version": "1.0.0",
   "type": "module",
@@ -8,13 +8,18 @@
     "build": "vite build",
     "lint": "eslint .",
     "preview": "node server.js --prod",
-    "start": "npm run build && node server.js --prod"
+    "serve": "node server.js --prod",
+    "start": "npm run build && npm run serve"
+  },
+  "engines": {
+    "node": ">=22.0.0"
   },
   "dependencies": {
     "lucide-react": "^0.511.0",
     "mysql2": "^3.20.0",
     "react": "^19.2.4",
-    "react-dom": "^19.2.4"
+    "react-dom": "^19.2.4",
+    "three": "^0.183.2"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",

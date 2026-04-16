@@ -5,7 +5,7 @@ import reactRefresh from 'eslint-plugin-react-refresh'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist']),
+  globalIgnores(['dist', 'game_tmp', 'game_tmp/**', 'public/game', 'public/game/**', 'src/NetworkBackground.jsx']),
   {
     files: ['**/*.{js,jsx}'],
     extends: [
