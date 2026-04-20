@@ -1153,7 +1153,7 @@ function AdminManagement({
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const managedUsers = useMemo(
-    () => users.filter(user => user.role === 'Employee' || user.role === 'Admin'),
+    () => users.filter(user => user.role === 'Employee' || user.role === 'Admin' || user.role === 'Super Admin'),
     [users],
   );
 
