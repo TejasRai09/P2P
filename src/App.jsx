@@ -202,10 +202,10 @@ export default function App() {
     await refreshState();
   };
 
-  const handleResetPassword = async userId => {
-    const response = await api.resetDepartmentPassword(sessionToken, userId);
+  const handleResetPassword = async (userId, password) => {
+    const response = await api.resetDepartmentPassword(sessionToken, userId, password);
     await refreshState();
-    return response.password;
+    return response;
   };
 
   const handleExportRequests = async () => {
@@ -765,8 +765,8 @@ function EmployeePortal({ requests, view, setView, onCreateRequest }) {
 
 function NewRequestForm({ onBack, onSubmit }) {
   const initialFormState = {
-    requestType: 'Pick-up',
-    priority: 'Medium',
+    requestType: '',
+    priority: '',
     pickupAddress: '',
     dropAddress: '',
     contactPerson: '',
@@ -788,6 +788,13 @@ function NewRequestForm({ onBack, onSubmit }) {
   const handleSubmit = async event => {
     event.preventDefault();
     setError('');
+
+    const requiredFields = ['requestType', 'priority', 'pickupAddress', 'dropAddress', 'contactPerson', 'mobileNumber', 'meetingTiming', 'description'];
+    const missingFields = requiredFields.filter(field => !String(formData[field] || '').trim());
+    if (missingFields.length > 0) {
+      setError('All request fields are required except the upload document.');
+      return;
+    }
 
     if (String(formData.mobileNumber).replace(/\D/g, '').length !== 10) {
       setError('Mobile number must be exactly 10 digits.');
@@ -870,6 +877,7 @@ function NewRequestForm({ onBack, onSubmit }) {
             <div className="space-y-3">
               <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">Request Category</label>
               <select required value={formData.requestType} onChange={event => setFormData({ ...formData, requestType: event.target.value })} className="w-full bg-slate-50 border border-slate-100 rounded-[1.25rem] px-5 py-4 outline-none focus:ring-4 focus:ring-[#FCE36D]/30 focus:border-[#FCE36D] text-slate-800 font-bold transition-all appearance-none cursor-pointer">
+                <option value="" disabled>Select request category</option>
                 <option value="Pick-up">Pick-up Only</option>
                 <option value="Drop">Drop Only</option>
                 <option value="Both">Both (Pick & Drop)</option>
@@ -878,6 +886,7 @@ function NewRequestForm({ onBack, onSubmit }) {
             <div className="space-y-3">
               <label className="block text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">Operational Priority</label>
               <select required value={formData.priority} onChange={event => setFormData({ ...formData, priority: event.target.value })} className="w-full bg-slate-50 border border-slate-100 rounded-[1.25rem] px-5 py-4 outline-none focus:ring-4 focus:ring-[#FCE36D]/30 focus:border-[#FCE36D] text-slate-800 font-bold transition-all appearance-none cursor-pointer">
+                <option value="" disabled>Select priority</option>
                 <option value="Low">Low - Normal processing</option>
                 <option value="Medium">Medium - Standard processing</option>
                 <option value="High">High - URGENT ACTION NEEDED</option>
@@ -1114,6 +1123,8 @@ function AdminManagement({
 }) {
   const [newRunner, setNewRunner] = useState('');
   const [newDept, setNewDept] = useState({ id: '', name: '', department: '', password: '' });
+  const [passwordTarget, setPasswordTarget] = useState(null);
+  const [passwordDraft, setPasswordDraft] = useState('');
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const employees = useMemo(() => users.filter(user => user.role === 'Employee'), [users]);
@@ -1166,12 +1177,32 @@ function AdminManagement({
     }
   };
 
-  const handleResetPasswordClick = async userId => {
+  const handleOpenPasswordDialog = user => {
+    setError('');
+    setNotice('');
+    setPasswordTarget(user);
+    setPasswordDraft('');
+  };
+
+  const handleClosePasswordDialog = () => {
+    setPasswordTarget(null);
+    setPasswordDraft('');
+  };
+
+  const handleResetPasswordSubmit = async event => {
+    event.preventDefault();
+    if (!passwordTarget) return;
+
     setError('');
     setNotice('');
     try {
-      const password = await onResetPassword(userId);
-      setNotice(`Password reset. Temporary password: ${password}`);
+      const response = await onResetPassword(passwordTarget.id, passwordDraft.trim());
+      handleClosePasswordDialog();
+      setNotice(
+        response.generated
+          ? `Password reset. Temporary password: ${response.password}`
+          : `Password updated for ${passwordTarget.id}.`,
+      );
     } catch (err) {
       setError(err.message);
     }
@@ -1282,8 +1313,8 @@ function AdminManagement({
                       <td className="px-5 py-4 font-medium text-slate-500">{employee.name || '—'}</td>
                       <td className="px-5 py-4 text-right">
                         <div className="flex justify-end gap-2">
-                          <button onClick={() => handleResetPasswordClick(employee.id)} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-blue-600 bg-blue-50 border border-blue-100 rounded-lg hover:bg-blue-100 transition-colors">
-                            <Key size={12} /> Reset Password
+                          <button onClick={() => handleOpenPasswordDialog(employee)} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-blue-600 bg-blue-50 border border-blue-100 rounded-lg hover:bg-blue-100 transition-colors">
+                            <Key size={12} /> Change Password
                           </button>
                           <button onClick={() => handleRemoveDepartmentClick(employee.id)} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-red-600 bg-red-50 border border-red-100 rounded-lg hover:bg-red-100 transition-colors">
                             <Trash2 size={12} /> Remove
@@ -1298,6 +1329,57 @@ function AdminManagement({
           </div>
         </div>
       </div>
+
+      {passwordTarget && (
+        <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-white rounded-[2rem] shadow-2xl w-full max-w-lg overflow-hidden border border-white/30">
+            <div className="px-6 py-4 bg-[#181C26] text-white flex items-start justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <div className="rounded-2xl bg-white/10 p-2.5">
+                  <Lock size={18} className="text-[#FCE36D]" />
+                </div>
+                <div>
+                  <h2 className="text-lg font-black tracking-tight">Change Department Password</h2>
+                  <p className="text-xs text-white/60 font-medium">{passwordTarget.id} - {passwordTarget.department}</p>
+                </div>
+              </div>
+              <button onClick={handleClosePasswordDialog} className="text-white/60 hover:text-white transition-colors">
+                <LogOut size={20} className="rotate-180" />
+              </button>
+            </div>
+
+            <form onSubmit={handleResetPasswordSubmit} className="p-6 space-y-4">
+              <div className="space-y-1.5">
+                <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">New Password</label>
+                <input
+                  type="text"
+                  value={passwordDraft}
+                  onChange={event => setPasswordDraft(event.target.value)}
+                  placeholder="Enter the password you want to set"
+                  className="w-full border border-slate-200 rounded-2xl px-4 py-3 text-sm font-bold outline-none bg-white focus:ring-4 focus:ring-[#FCE36D]/20"
+                />
+              </div>
+              <p className="text-xs text-slate-500 leading-relaxed">
+                Leave this blank if you want Z-Track to generate a temporary password automatically.
+              </p>
+
+              <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={handleClosePasswordDialog}
+                  className="px-5 py-3 rounded-xl border border-slate-200 text-slate-600 font-bold text-sm hover:bg-slate-50 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button type="submit" className="btn-primary-courier justify-center">
+                  <Key size={16} />
+                  Update Password
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

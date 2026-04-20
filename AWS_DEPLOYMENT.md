@@ -19,6 +19,8 @@ Set these in the AWS service configuration or secrets manager:
 - `DB_USER`
 - `DB_PASSWORD`
 - `DB_NAME`
+- `OUTLOOK_USER`
+- `OUTLOOK_PASS`
 
 ## Health check
 
@@ -44,4 +46,5 @@ docker run --rm -p 3000:3000 --env-file .env z-track
 
 - The frontend and API share the same origin, so no separate API base URL is needed.
 - The server now fails fast if production database settings are missing.
+- Ticket creation sends notification emails to the department address and the admin mailbox.
 - Update the seeded demo credentials before exposing the app to real users.

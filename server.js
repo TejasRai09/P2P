@@ -1,5 +1,7 @@
 import http from 'node:http'
+import net from 'node:net'
 import path from 'node:path'
+import tls from 'node:tls'
 import { fileURLToPath } from 'node:url'
 import {
   createReadStream,
@@ -22,8 +24,16 @@ const dbPort = Number(process.env.DB_PORT || 3306)
 const dbUser = process.env.DB_USER || 'root'
 const dbPassword = process.env.DB_PASSWORD || 'server1'
 const dbName = process.env.DB_NAME || 'z_track'
+const ticketTrackingUrl = 'https://ztrack.zuarimoney.com/'
+const smtpHost = process.env.OUTLOOK_SMTP_HOST || 'smtpout.secureserver.net'
+const smtpPort = Number(process.env.OUTLOOK_SMTP_PORT || 587)
+const smtpUser = String(process.env.OUTLOOK_USER || '').trim()
+const smtpPass = String(process.env.OUTLOOK_PASS || '').trim()
+const smtpFromName = 'Z-Track'
+const smtpClientName = process.env.OUTLOOK_CLIENT_NAME || 'ztrack.zuarimoney.com'
+const mailNotificationsEnabled = Boolean(smtpUser && smtpPass)
 const tokenTtlDays = 7
-const requiredProductionEnvVars = ['DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME']
+const requiredProductionEnvVars = ['DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME', 'OUTLOOK_USER', 'OUTLOOK_PASS']
 
 let pool = null
 let server = null
@@ -37,6 +47,10 @@ function isoInDays(days) {
   const date = new Date()
   date.setDate(date.getDate() + days)
   return date.toISOString()
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
 }
 
 function json(res, statusCode, payload) {
@@ -164,6 +178,336 @@ function requestFromRow(row) {
     adminComments: row.admin_comments,
     completionDate: row.completion_date,
   }
+}
+
+function normalizeNotificationKey(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '')
+}
+
+function uniqueStrings(values) {
+  return [...new Set(values.map(value => String(value || '').trim()).filter(Boolean))]
+}
+
+function sanitizeHeaderValue(value) {
+  return String(value || '').replace(/[\r\n]+/g, ' ').trim()
+}
+
+const departmentNotificationEmails = {
+  admin: ['hr@adventz.zuarimoney.com'],
+  operations: ['hr@adventz.zuarimoney.com'],
+  hr: ['hr@adventz.zuarimoney.com'],
+  finance: ['accounts@adventz.zuarimoney.com'],
+  it: ['it@adventz.zuarimoney.com'],
+  backoffice: ['broking@adventz.zuarimoney.com'],
+  rms: ['rms.eq@adventz.zuarimoney.com'],
+  mfo: ['mf@adventz.zuarimoney.com'],
+  rta: ['rta1@adventz.zuarimoney.com'],
+  cs: ['NehaR@adventz.com'],
+  compliance: ['compliance@adventz.zuarimoney.com'],
+  delhi1: ['pankajk@adventz.zuarimoney.com'],
+  delhi2: ['ManojV@adventz.com'],
+  dp: ['abhisheks@adventz.zuarimoney.com'],
+  kyc: ['rams@adventz.zuarimoney.com'],
+  customerservice: ['rajesh.machhal@adventz.com'],
+  insurance: ['SandeepR@zuariinsurance.in'],
+}
+
+function getNotificationRecipients(user) {
+  const recipients = new Set(departmentNotificationEmails.admin || [])
+  const lookupKeys = [
+    normalizeNotificationKey(user?.id),
+    normalizeNotificationKey(user?.department),
+  ]
+
+  for (const key of lookupKeys) {
+    for (const email of departmentNotificationEmails[key] || []) {
+      recipients.add(email)
+    }
+  }
+
+  return [...recipients]
+}
+
+function buildTicketNotificationBody(request) {
+  return [
+    'A new ticket has been raised in Z-Track.',
+    '',
+    `Ticket ID: ${request.id}`,
+    `Raised By: ${request.employeeName} (${request.employeeId})`,
+    `Department: ${request.department}`,
+    `Request Type: ${request.requestType}`,
+    `Priority: ${request.priority}`,
+    `Meeting Timing: ${request.meetingTiming}`,
+    `Pickup Address: ${request.pickupAddress}`,
+    `Drop Address: ${request.dropAddress}`,
+    `Contact Person: ${request.contactPerson}`,
+    `Mobile Number: ${request.mobileNumber}`,
+    `Description: ${request.description}`,
+    '',
+    `Track the ticket here: ${ticketTrackingUrl}`,
+  ].join('\r\n')
+}
+
+function dotStuffSmtpBody(text) {
+  return String(text)
+    .replace(/\r?\n/g, '\r\n')
+    .replace(/^\./gm, '..')
+}
+
+function createSmtpSession(socket) {
+  socket.setEncoding('utf8')
+  socket.setNoDelay(true)
+  socket.setTimeout(15_000)
+
+  let buffer = ''
+  let pending = null
+  let settledError = null
+
+  function flushResponse() {
+    if (!pending) return
+
+    let code = null
+    let lines = []
+    let cursor = 0
+
+    while (true) {
+      const newlineIndex = buffer.indexOf('\n', cursor)
+      if (newlineIndex === -1) return
+
+      let line = buffer.slice(cursor, newlineIndex)
+      cursor = newlineIndex + 1
+      if (line.endsWith('\r')) line = line.slice(0, -1)
+
+      if (code === null) {
+        const match = line.match(/^(\d{3})([- ])(.*)$/)
+        if (!match) continue
+
+        code = match[1]
+        lines.push(match[3])
+        if (match[2] === ' ') {
+          buffer = buffer.slice(cursor)
+          const { resolve } = pending
+          pending = null
+          resolve({
+            code: Number(code),
+            lines,
+            message: lines.join('\n'),
+          })
+          return
+        }
+        continue
+      }
+
+      const match = line.match(new RegExp(`^${code}([- ])(.*)$`))
+      if (!match) {
+        lines.push(line)
+        continue
+      }
+
+      lines.push(match[2])
+      if (match[1] === ' ') {
+        buffer = buffer.slice(cursor)
+        const { resolve } = pending
+        pending = null
+        resolve({
+          code: Number(code),
+          lines,
+          message: lines.join('\n'),
+        })
+        return
+      }
+    }
+  }
+
+  function failPending(error) {
+    settledError = error
+    if (!pending) return
+    const { reject } = pending
+    pending = null
+    reject(error)
+  }
+
+  socket.on('data', chunk => {
+    buffer += chunk
+    flushResponse()
+  })
+
+  socket.on('error', error => {
+    failPending(error)
+  })
+
+  socket.on('close', () => {
+    failPending(new Error('SMTP connection closed unexpectedly.'))
+  })
+
+  socket.on('timeout', () => {
+    failPending(new Error('SMTP connection timed out.'))
+  })
+
+  return {
+    socket,
+    readResponse() {
+      if (settledError) {
+        return Promise.reject(settledError)
+      }
+      if (pending) {
+        return Promise.reject(new Error('SMTP response already pending.'))
+      }
+
+      return new Promise((resolve, reject) => {
+        pending = { resolve, reject }
+        flushResponse()
+      })
+    },
+    detach() {
+      socket.removeAllListeners('data')
+      socket.removeAllListeners('error')
+      socket.removeAllListeners('close')
+      socket.removeAllListeners('timeout')
+    },
+  }
+}
+
+async function openPlainSmtpConnection() {
+  const socket = net.createConnection({
+    host: smtpHost,
+    port: smtpPort,
+  })
+  const session = createSmtpSession(socket)
+
+  await new Promise((resolve, reject) => {
+    socket.once('connect', resolve)
+    socket.once('error', reject)
+  })
+
+  const greeting = await session.readResponse()
+  if (greeting.code !== 220) {
+    throw new Error(`Unexpected SMTP greeting: ${greeting.code} ${greeting.message}`)
+  }
+
+  return session
+}
+
+async function upgradeSmtpSessionToTls(session) {
+  const { socket } = session
+  session.detach()
+
+  const secureSocket = tls.connect({
+    socket,
+    servername: smtpHost,
+  })
+  const secureSession = createSmtpSession(secureSocket)
+
+  await new Promise((resolve, reject) => {
+    secureSocket.once('secureConnect', resolve)
+    secureSocket.once('error', reject)
+  })
+
+  return secureSession
+}
+
+async function sendSmtpCommand(session, command, expectedCodes) {
+  session.socket.write(`${command}\r\n`)
+  const response = await session.readResponse()
+  if (!expectedCodes.includes(response.code)) {
+    throw new Error(`SMTP command failed (${command}): ${response.code} ${response.message}`)
+  }
+  return response
+}
+
+async function sendTicketNotificationEmail(recipientEmail, request) {
+  if (!mailNotificationsEnabled) {
+    return
+  }
+
+  const subject = sanitizeHeaderValue(`[Z-Track] Ticket ${request.id} raised`)
+  const body = dotStuffSmtpBody(buildTicketNotificationBody(request))
+
+  let session = null
+  try {
+    session = await openPlainSmtpConnection()
+
+    await sendSmtpCommand(session, `EHLO ${smtpClientName}`, [250])
+    await sendSmtpCommand(session, 'STARTTLS', [220])
+
+    const tlsSession = await upgradeSmtpSessionToTls(session)
+    session = tlsSession
+
+    await sendSmtpCommand(session, `EHLO ${smtpClientName}`, [250])
+    await sendSmtpCommand(session, 'AUTH LOGIN', [334])
+    await sendSmtpCommand(session, Buffer.from(smtpUser, 'utf8').toString('base64'), [334])
+    await sendSmtpCommand(session, Buffer.from(smtpPass, 'utf8').toString('base64'), [235])
+    await sendSmtpCommand(session, `MAIL FROM:<${smtpUser}>`, [250])
+    await sendSmtpCommand(session, `RCPT TO:<${recipientEmail}>`, [250, 251])
+    await sendSmtpCommand(session, 'DATA', [354])
+
+    const message = [
+      `From: ${smtpFromName} <${smtpUser}>`,
+      `To: ${recipientEmail}`,
+      `Subject: ${subject}`,
+      `Date: ${new Date().toUTCString()}`,
+      'MIME-Version: 1.0',
+      'Content-Type: text/plain; charset=utf-8',
+      'Content-Transfer-Encoding: 8bit',
+      '',
+      body,
+      '.',
+    ].join('\r\n')
+
+    session.socket.write(`${message}\r\n`)
+    const dataResponse = await session.readResponse()
+    if (dataResponse.code !== 250) {
+      throw new Error(`SMTP message rejected: ${dataResponse.code} ${dataResponse.message}`)
+    }
+
+    try {
+      await sendSmtpCommand(session, 'QUIT', [221])
+    } catch (error) {
+      void error
+    }
+  } finally {
+    if (session?.socket) {
+      session.socket.destroy()
+    }
+  }
+}
+
+async function notifyTicketRaised(request, user) {
+  const recipients = getNotificationRecipients(user)
+  if (!recipients.length) {
+    return
+  }
+
+  const uniqueRecipients = uniqueStrings(recipients)
+  const results = await Promise.allSettled(
+    uniqueRecipients.map(recipientEmail => sendWithRetry(() => sendTicketNotificationEmail(recipientEmail, request))),
+  )
+
+  for (let index = 0; index < results.length; index += 1) {
+    const result = results[index]
+    if (result.status === 'rejected') {
+      console.error(`Failed to send ticket notification to ${uniqueRecipients[index]}:`, result.reason)
+    }
+  }
+}
+
+async function sendWithRetry(task, attempts = 3, baseDelayMs = 750) {
+  let lastError = null
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await task()
+    } catch (error) {
+      lastError = error
+      if (attempt < attempts) {
+        await sleep(baseDelayMs * attempt)
+      }
+    }
+  }
+
+  throw lastError
 }
 
 async function queryAll(sql, params = []) {
@@ -658,29 +1002,14 @@ async function handleApi(req, res, url) {
     }
 
     const body = await readBody(req)
-    if (!body.mobileNumber || String(body.mobileNumber).replace(/\D/g, '').length !== 10) {
-      json(res, 400, { error: 'Mobile number must be exactly 10 digits.' })
-      return true
-    }
-
-    const meetingTiming = body.meetingTiming ? new Date(body.meetingTiming) : null
-    if (!meetingTiming || Number.isNaN(meetingTiming.getTime())) {
-      json(res, 400, { error: 'Meeting timing is required.' })
-      return true
-    }
-    if (meetingTiming < new Date()) {
-      json(res, 400, { error: 'Meeting timing cannot be in the past.' })
-      return true
-    }
-
     const request = {
       id: '',
       date: isoNow(),
       employeeName: user.name,
       employeeId: user.id,
       department: user.department,
-      requestType: body.requestType || 'Pick-up',
-      priority: body.priority || 'Medium',
+      requestType: String(body.requestType || '').trim(),
+      priority: String(body.priority || '').trim(),
       pickupAddress: String(body.pickupAddress || '').trim(),
       dropAddress: String(body.dropAddress || '').trim(),
       contactPerson: String(body.contactPerson || '').trim(),
@@ -696,7 +1025,27 @@ async function handleApi(req, res, url) {
 
     const requiredFields = ['pickupAddress', 'dropAddress', 'contactPerson', 'description']
     if (requiredFields.some(field => !request[field])) {
-      json(res, 400, { error: 'All request fields are required.' })
+      json(res, 400, { error: 'All request fields are required except the upload document.' })
+      return true
+    }
+
+    if (!request.requestType || !request.priority) {
+      json(res, 400, { error: 'All request fields are required except the upload document.' })
+      return true
+    }
+
+    if (!request.mobileNumber || request.mobileNumber.length !== 10) {
+      json(res, 400, { error: 'Mobile number must be exactly 10 digits.' })
+      return true
+    }
+
+    const meetingTiming = request.meetingTiming ? new Date(request.meetingTiming) : null
+    if (!meetingTiming || Number.isNaN(meetingTiming.getTime())) {
+      json(res, 400, { error: 'Meeting timing is required.' })
+      return true
+    }
+    if (meetingTiming < new Date()) {
+      json(res, 400, { error: 'Meeting timing cannot be in the past.' })
       return true
     }
 
@@ -738,6 +1087,9 @@ async function handleApi(req, res, url) {
     )
 
     json(res, 201, { request })
+    void notifyTicketRaised(request, user).catch(error => {
+      console.error(`Failed to queue ticket notifications for ${request.id}:`, error)
+    })
     return true
   }
 
@@ -866,6 +1218,7 @@ async function handleApi(req, res, url) {
     const user = await authUserFromToken(getBearerToken(req))
     if (!requireSuperAdmin(res, user)) return true
 
+    const body = await readBody(req)
     const id = decodeURIComponent(url.pathname.split('/')[3] || '')
     const existing = await queryOne('SELECT id FROM users WHERE id = ?', [id])
     if (!existing) {
@@ -873,7 +1226,9 @@ async function handleApi(req, res, url) {
       return true
     }
 
-    const password = `ZTRACK-${crypto.randomBytes(4).toString('hex').toUpperCase()}`
+    const requestedPassword = String(body.password || '').trim()
+    const generatedPassword = `ZTRACK-${crypto.randomBytes(4).toString('hex').toUpperCase()}`
+    const password = requestedPassword || generatedPassword
     const hashed = hashPassword(password)
     await execute(
       `UPDATE users
@@ -882,7 +1237,10 @@ async function handleApi(req, res, url) {
       [hashed.hash, hashed.salt, hashed.scheme, isoNow(), id],
     )
 
-    json(res, 200, { password })
+    json(res, 200, {
+      password,
+      generated: !requestedPassword,
+    })
     return true
   }
 

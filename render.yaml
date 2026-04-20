@@ -11,4 +11,4 @@ services:
         value: production
       - key: ZTRACK_SECRET
         generateValue: true
-      # Configure DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, and DB_NAME in the Render dashboard.
+      # Configure DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME, OUTLOOK_USER, and OUTLOOK_PASS in the Render dashboard.

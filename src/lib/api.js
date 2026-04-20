@@ -387,25 +387,18 @@ function localCreateRequest(token, requestPayload) {
     throw new Error('Only employees can create requests.');
   }
 
-  const mobileNumber = String(requestPayload?.mobileNumber || '').replace(/\D/g, '').slice(0, 10);
-  if (!mobileNumber || mobileNumber.length !== 10) {
-    throw new Error('Mobile number must be exactly 10 digits.');
-  }
-
-  validateMeetingTiming(requestPayload?.meetingTiming);
-
   const request = {
     id: findUniqueTicketId(state),
     date: nowIso(),
     employeeName: user.name,
     employeeId: user.id,
     department: user.department,
-    requestType: requestPayload?.requestType || 'Pick-up',
-    priority: requestPayload?.priority || 'Medium',
+    requestType: String(requestPayload?.requestType || '').trim(),
+    priority: String(requestPayload?.priority || '').trim(),
     pickupAddress: String(requestPayload?.pickupAddress || '').trim(),
     dropAddress: String(requestPayload?.dropAddress || '').trim(),
     contactPerson: String(requestPayload?.contactPerson || '').trim(),
-    mobileNumber,
+    mobileNumber: String(requestPayload?.mobileNumber || '').replace(/\D/g, '').slice(0, 10),
     meetingTiming: String(requestPayload?.meetingTiming || ''),
     description: String(requestPayload?.description || '').trim(),
     assignedPerson: '',
@@ -415,10 +408,16 @@ function localCreateRequest(token, requestPayload) {
     completionDate: null,
   };
 
-  const requiredFields = ['pickupAddress', 'dropAddress', 'contactPerson', 'description'];
+  const requiredFields = ['requestType', 'priority', 'pickupAddress', 'dropAddress', 'contactPerson', 'mobileNumber', 'meetingTiming', 'description'];
   if (requiredFields.some(field => !request[field])) {
-    throw new Error('All request fields are required.');
+    throw new Error('All request fields are required except the upload document.');
   }
+
+  if (request.mobileNumber.length !== 10) {
+    throw new Error('Mobile number must be exactly 10 digits.');
+  }
+
+  validateMeetingTiming(request.meetingTiming);
 
   state.requests.push(request);
   setState(state);
@@ -528,7 +527,7 @@ function localRemoveDepartment(token, userId) {
   return { ok: true };
 }
 
-function localResetDepartmentPassword(token, userId) {
+function localResetDepartmentPassword(token, userId, requestedPassword) {
   const state = getState();
   requireSuperAdminLocal(state, token);
 
@@ -537,10 +536,14 @@ function localResetDepartmentPassword(token, userId) {
     throw new Error('User not found.');
   }
 
-  const password = `ZTRACK-${randomHex(8).toUpperCase()}`;
+  const generatedPassword = `ZTRACK-${randomHex(8).toUpperCase()}`;
+  const password = String(requestedPassword || '').trim() || generatedPassword;
   user.password = password;
   setState(state);
-  return { password };
+  return {
+    password,
+    generated: !String(requestedPassword || '').trim(),
+  };
 }
 
 function localExportRequests(token) {
@@ -598,8 +601,8 @@ export const api = USE_LOCAL_API
       removeDepartment(token, userId) {
         return Promise.resolve(localRemoveDepartment(token, userId));
       },
-      resetDepartmentPassword(token, userId) {
-        return Promise.resolve(localResetDepartmentPassword(token, userId));
+      resetDepartmentPassword(token, userId, password) {
+        return Promise.resolve(localResetDepartmentPassword(token, userId, password));
       },
       exportRequests(token) {
         return Promise.resolve(localExportRequests(token));
@@ -661,10 +664,11 @@ export const api = USE_LOCAL_API
           token,
         });
       },
-      resetDepartmentPassword(token, userId) {
+      resetDepartmentPassword(token, userId, password) {
         return request(`/api/users/${encodeURIComponent(userId)}/reset-password`, {
           method: 'POST',
           token,
+          body: { password },
         });
       },
       exportRequests(token) {
