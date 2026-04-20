@@ -526,7 +526,7 @@ function LoginScreen({ users, onLogin, errorBanner, clearError }) {
              <img 
                src="https://www.zuarimoney.com/App_Themes/images/Zuari_whatsnew2.jpg" 
                alt="Zuari Logo" 
-               className="h-14 object-contain contrast-[1.1]"
+               className="h-20 w-auto object-contain contrast-[1.1] drop-shadow-sm"
              />
            </div>
 
