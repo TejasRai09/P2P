@@ -36,6 +36,12 @@ const PRIORITY_COLORS = {
   Low: 'text-green-600 bg-green-50 border-green-100',
 };
 
+const FINAL_REQUEST_STATUSES = new Set(['Completed', 'Cancelled']);
+
+function isFinalRequestStatus(status) {
+  return FINAL_REQUEST_STATUSES.has(status);
+}
+
 function formatDate(dateStr) {
   if (!dateStr) return 'N/A';
   return new Date(dateStr).toLocaleString('en-IN', {
@@ -526,7 +532,7 @@ function LoginScreen({ users, onLogin, errorBanner, clearError }) {
              <img 
                src="https://www.zuarimoney.com/App_Themes/images/Zuari_whatsnew2.jpg" 
                alt="Zuari Logo" 
-               className="h-20 w-auto object-contain contrast-[1.1] drop-shadow-sm"
+               className="h-14 object-contain contrast-[1.1]"
              />
            </div>
 
@@ -627,7 +633,7 @@ function Navbar({ user, onLogout, setView }) {
       <div className="max-w-7xl mx-auto px-3 sm:px-4 md:px-6 lg:px-8 h-20 flex items-center justify-between">
         <button className="flex items-center gap-4 cursor-pointer group" onClick={() => setView('dashboard')}>
           <div className="bg-white/95 p-2 rounded-xl backdrop-blur-md shadow-lg transition-transform group-hover:scale-105">
-            <img src="https://www.zuarimoney.com/App_Themes/images/Zuari_whatsnew2.jpg" alt="Zuari Logo" className="h-6 object-contain mix-blend-multiply" />
+            <img src="https://www.zuarimoney.com/App_Themes/images/Zuari_whatsnew2.jpg" alt="Zuari Logo" className="h-10 w-auto object-contain mix-blend-multiply" />
           </div>
           <div className="h-8 w-px bg-white/10 hidden sm:block" />
           <div className="flex flex-col">
@@ -1076,22 +1082,41 @@ function AdminPortal({ user, requests, runners, setView, onUpdateRequest, onExpo
                       {request.status}
                     </span>
                   </td>
-                  <td className="px-8 py-5 text-right">
-                    <div className="flex justify-end gap-3 opacity-80 group-hover:opacity-100 transition-opacity">
-                       <button
-                         onClick={() => setSelectedRequest(request)}
-                         className="inline-flex items-center gap-2 px-6 py-2 bg-slate-100 text-[#181C26] rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-[#FCE36D] transition-all"
-                       >
-                         Trace
-                       </button>
-                       <button
-                         onClick={() => setEditingRequest(request)}
-                         className="inline-flex items-center gap-2 px-10 py-2 bg-[#181C26] text-[#FCE36D] rounded-xl text-[10px] font-black uppercase tracking-widest hover:scale-105 active:scale-95 transition-all"
-                       >
-                         Log <ArrowRight size={14} />
-                       </button>
-                    </div>
-                  </td>
+                      <td className="px-8 py-5 text-right">
+                        <div className="flex justify-end gap-3 opacity-80 group-hover:opacity-100 transition-opacity">
+                           <button
+                             onClick={() => setSelectedRequest(request)}
+                             className="inline-flex items-center gap-2 px-6 py-2 bg-slate-100 text-[#181C26] rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-[#FCE36D] transition-all"
+                           >
+                             Trace
+                           </button>
+                           <button
+                             onClick={() => {
+                               if (!isFinalRequestStatus(request.status)) {
+                                 setEditingRequest(request);
+                               }
+                             }}
+                             disabled={isFinalRequestStatus(request.status)}
+                             className={`inline-flex items-center gap-2 px-10 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${
+                               isFinalRequestStatus(request.status)
+                                 ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
+                                 : 'bg-[#181C26] text-[#FCE36D] hover:scale-105 active:scale-95'
+                             }`}
+                             title={isFinalRequestStatus(request.status) ? 'Ticket is closed' : 'Update ticket'}
+                           >
+                             {isFinalRequestStatus(request.status) ? (
+                               <>
+                                 <Lock size={14} />
+                                 Locked
+                               </>
+                             ) : (
+                               <>
+                                 Log <ArrowRight size={14} />
+                               </>
+                             )}
+                           </button>
+                        </div>
+                      </td>
                 </tr>
               ))}
             </tbody>
@@ -1127,7 +1152,10 @@ function AdminManagement({
   const [passwordDraft, setPasswordDraft] = useState('');
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
-  const employees = useMemo(() => users.filter(user => user.role === 'Employee'), [users]);
+  const managedUsers = useMemo(
+    () => users.filter(user => user.role === 'Employee' || user.role === 'Admin'),
+    [users],
+  );
 
   const handleAddRunner = async event => {
     event.preventDefault();
@@ -1304,9 +1332,9 @@ function AdminManagement({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-50">
-                  {employees.length === 0 ? (
+                  {managedUsers.length === 0 ? (
                     <tr><td colSpan={4} className="px-5 py-10 text-center text-slate-300 italic">No departments configured</td></tr>
-                  ) : employees.map(employee => (
+                  ) : managedUsers.map(employee => (
                     <tr key={employee.id} className="hover:bg-slate-50 transition-colors">
                       <td className="px-5 py-4 font-black text-[#181C26]">{employee.id}</td>
                       <td className="px-5 py-4 font-medium text-slate-600">{employee.department}</td>
@@ -1316,9 +1344,11 @@ function AdminManagement({
                           <button onClick={() => handleOpenPasswordDialog(employee)} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-blue-600 bg-blue-50 border border-blue-100 rounded-lg hover:bg-blue-100 transition-colors">
                             <Key size={12} /> Change Password
                           </button>
-                          <button onClick={() => handleRemoveDepartmentClick(employee.id)} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-red-600 bg-red-50 border border-red-100 rounded-lg hover:bg-red-100 transition-colors">
-                            <Trash2 size={12} /> Remove
-                          </button>
+                          {employee.role === 'Employee' && (
+                            <button onClick={() => handleRemoveDepartmentClick(employee.id)} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-red-600 bg-red-50 border border-red-100 rounded-lg hover:bg-red-100 transition-colors">
+                              <Trash2 size={12} /> Remove
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -1413,9 +1443,14 @@ function AdminEditModal({ request, runners, onClose, onSave }) {
   const [formData, setFormData] = useState({ ...request });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const isLocked = isFinalRequestStatus(request.status);
 
   const handleSubmit = async event => {
     event.preventDefault();
+    if (isLocked) {
+      setError('This ticket is closed and cannot be modified.');
+      return;
+    }
     setSaving(true);
     setError('');
     try {
@@ -1435,6 +1470,12 @@ function AdminEditModal({ request, runners, onClose, onSave }) {
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><LogOut size={20} className="rotate-180" /></button>
         </div>
         <div className="overflow-y-auto p-6">
+          {isLocked && (
+            <div className="mb-4 p-3 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl text-sm font-medium flex items-center gap-2">
+              <Lock size={16} />
+              This ticket is closed. No further activity is allowed.
+            </div>
+          )}
           {error && (
             <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-600 rounded-xl text-sm font-medium flex items-center gap-2">
               <AlertCircle size={16} />
@@ -1445,7 +1486,12 @@ function AdminEditModal({ request, runners, onClose, onSave }) {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Status</label>
-                <select value={formData.status} onChange={event => setFormData({ ...formData, status: event.target.value })} className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 outline-none">
+                <select
+                  value={formData.status}
+                  onChange={event => setFormData({ ...formData, status: event.target.value })}
+                  disabled={isLocked}
+                  className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 outline-none disabled:bg-gray-100 disabled:text-gray-400"
+                >
                   <option value="Pending">Pending</option>
                   <option value="Assigned">Assigned</option>
                   <option value="In Progress">In Progress</option>
@@ -1455,7 +1501,12 @@ function AdminEditModal({ request, runners, onClose, onSave }) {
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Assign Runner</label>
-                <select value={formData.assignedPerson} onChange={event => setFormData({ ...formData, assignedPerson: event.target.value })} className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 outline-none">
+                <select
+                  value={formData.assignedPerson}
+                  onChange={event => setFormData({ ...formData, assignedPerson: event.target.value })}
+                  disabled={isLocked}
+                  className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 outline-none disabled:bg-gray-100 disabled:text-gray-400"
+                >
                   <option value="">-- Select Runner --</option>
                   {runners.map(runner => <option key={runner} value={runner}>{runner}</option>)}
                 </select>
@@ -1465,8 +1516,8 @@ function AdminEditModal({ request, runners, onClose, onSave }) {
         </div>
         <div className="px-6 py-4 border-t border-gray-100 bg-gray-50 flex justify-end gap-3">
           <button onClick={onClose} className="px-5 py-2 rounded-xl border border-gray-300 text-gray-700 font-medium">Cancel</button>
-          <button type="submit" form="update-form" disabled={saving} className="px-6 py-2 rounded-xl bg-blue-600 text-white font-medium disabled:opacity-70">
-            {saving ? 'Saving...' : 'Save Updates'}
+          <button type="submit" form="update-form" disabled={saving || isLocked} className="px-6 py-2 rounded-xl bg-blue-600 text-white font-medium disabled:opacity-70">
+            {saving ? 'Saving...' : isLocked ? 'Locked' : 'Save Updates'}
           </button>
         </div>
       </div>

@@ -53,6 +53,10 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+function isFinalRequestStatus(status) {
+  return status === 'Completed' || status === 'Cancelled'
+}
+
 function json(res, statusCode, payload) {
   const body = JSON.stringify(payload)
   res.writeHead(statusCode, {
@@ -1104,9 +1108,14 @@ async function handleApi(req, res, url) {
       return true
     }
 
+    if (isFinalRequestStatus(existing.status)) {
+      json(res, 409, { error: 'Closed requests cannot be updated.' })
+      return true
+    }
+
     const body = await readBody(req)
     const nextStatus = body.status || existing.status
-    const nextCompletionDate = nextStatus === 'Completed'
+    const nextCompletionDate = isFinalRequestStatus(nextStatus)
       ? existing.completion_date || isoNow()
       : existing.completion_date
 

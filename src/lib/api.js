@@ -3,6 +3,7 @@ import { seedRequests, seedRunners, seedUsers } from './localData.js';
 const TOKEN_KEY = 'ztrack_session_token';
 const LOCAL_STATE_KEY = 'ztrack_local_state_v2';
 const SESSION_TTL_DAYS = 7;
+const FINAL_REQUEST_STATUSES = new Set(['Completed', 'Cancelled']);
 
 const isBrowser = typeof window !== 'undefined';
 const forcedLocalMode = isBrowser && window.__ZTRACK_API_MODE__ === 'local';
@@ -196,6 +197,10 @@ function requireSuperAdminLocal(state, token) {
     throw new Error('Super Admin access required.');
   }
   return user;
+}
+
+function isFinalRequestStatus(status) {
+  return FINAL_REQUEST_STATUSES.has(status);
 }
 
 function makeCsv(rows) {
@@ -433,8 +438,12 @@ function localUpdateRequest(token, requestId, updatePayload) {
     throw new Error('Request not found.');
   }
 
+  if (isFinalRequestStatus(existing.status)) {
+    throw new Error('Closed requests cannot be updated.');
+  }
+
   const nextStatus = updatePayload?.status || existing.status;
-  const nextCompletionDate = nextStatus === 'Completed'
+  const nextCompletionDate = isFinalRequestStatus(nextStatus)
     ? existing.completionDate || nowIso()
     : existing.completionDate;
 
